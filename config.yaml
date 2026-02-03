@@ -1,0 +1,79 @@
+# Maximo Application Suite Installation Configuration
+
+# MAS Instance Configuration
+mas:
+  instance_id: "masdemo"
+  workspace_id: "masdemo"
+  workspace_name: "MAS Demo"
+  ocp_project: ""
+  net_domain: ""
+  catalog_version: "v9-250828-amd64"
+  channel: "9.1.x-feature"
+  operational_mode: "non-prod"  # non-prod or prod
+
+# IBM Entitlement
+ibm:
+  entitlement_key: ""
+
+# Storage Configuration
+storage:
+  rwo_class: "longhorn"
+  rwx_class: "longhorn"
+  pipeline_class: "longhorn"
+  access_mode: "ReadWriteOnce"
+
+# User Data Service Configuration
+uds:
+  email: "email@example.com"
+  firstname: "NOME"
+  lastname: "COGNOME"
+
+# Database Configuration
+mongodb:
+  namespace: "mongoce"
+
+db2:
+  manage: true
+  channel: "v110509.0"
+  namespace: "db2u"
+  type: "db2wh"
+  cpu_requests: "300m"
+  cpu_limits: "6000m"
+  memory_requests: "8Gi"
+  memory_limits: "12Gi"
+  backup_storage: "10Gi"
+  data_storage: "20Gi"
+  logs_storage: "10Gi"
+  meta_storage: "10Gi"
+  temp_storage: "10Gi"
+
+# Maximo Manage Application Configuration
+manage:
+  install: true
+  channel: "9.1.x-feature"
+  jdbc: "workspace-application"
+  components: "base=latest,health=latest"
+  server_bundle_size: "dev"
+
+# Optional Applications (set to true to install)
+applications:
+  iot: false
+  monitor: false
+  predict: false
+  optimizer: false
+  assist: false
+  visual_inspection: false
+  facilities: false
+
+# File paths (relative to script location)
+files:
+  pull_secret: "pull-secret"
+  license: "license.dat"
+
+# Container Configuration
+container:
+  name: "mas-installer"
+  image: "quay.io/ibmmas/cli:latest"
+  network: "host"
+  # Engine preference: "docker", "podman", or "auto" (auto-detect)
+  engine: "auto"

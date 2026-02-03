@@ -1,0 +1,40 @@
+docker pull quay.io/ibmmas/cli
+
+docker run -dit --name sno quay.io/ibmmas/cli:latest bash
+
+docker exec sno mkdir -p /mascli/masconfig
+
+docker cp ~/Downloads/maximo/pull-secret sno:/mascli/masconfig/pull-secret
+
+docker cp ~/Downloads/maximo/license.dat sno:/mascli/masconfig/license.dat
+
+docker exec -it sno bash
+
+export IBM_ENTITLEMENT_KEY=xxx
+
+mas install --mas-catalog-version v9-250828-amd64 --ibm-entitlement-key $IBM_ENTITLEMENT_KEY \
+  --mas-channel 9.1.x-feature --mas-instance-id masdemosno --mas-workspace-id masdemo --mas-workspace-name "MAS Demo" \
+  --non-prod \
+  --storage-class-rwo "longhorn" --storage-class-rwx "longhorn" \
+  --storage-pipeline "longhorn" --storage-accessmode "ReadWriteOnce" \
+  --license-file "/mascli/masconfig/license.dat" \
+  --uds-email "mas@example.com" --uds-firstname "First Name" --uds-lastname "Last Name" \
+  --mongodb-namespace "mongoce" \
+  --manage-channel "9.1.x-feature" \
+  --manage-jdbc "workspace-application" \
+  --manage-components "base=latest,health=latest" \
+  --manage-server-bundle-size "dev" \
+  --db2-manage \
+  --db2-channel "v110509.0" \
+  --db2-namespace "db2u" \
+  --db2-type "db2wh" \
+  --db2-cpu-requests "300m" \
+  --db2-cpu-limits "6000m" \
+  --db2-memory-requests "8Gi" \
+  --db2-memory-limits "12Gi" \
+  --db2-backup-storage "10Gi" \
+  --db2-data-storage "20Gi" \
+  --db2-logs-storage "10Gi" \
+  --db2-meta-storage "10Gi" \
+  --db2-temp-storage "10Gi" \
+  --accept-license --no-confirm
