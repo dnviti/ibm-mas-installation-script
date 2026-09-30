@@ -9,7 +9,7 @@ Guida all'installazione di [Longhorn](https://longhorn.io/) come storage distrib
 Longhorn richiede che `open-iscsi` sia installato e il demone `iscsid` sia attivo su tutti i nodi worker. Su RHEL/CoreOS (nodi OpenShift):
 
 ```bash
-yum --setopt=tsflags=noscripts install iscsi-initiator-utils
+dnf --setopt=tsflags=noscripts install iscsi-initiator-utils
 echo "InitiatorName=$(/sbin/iscsi-iname)" > /etc/iscsi/initiatorname.iscsi
 systemctl enable iscsid
 systemctl start iscsid
@@ -96,8 +96,9 @@ openshift:
 image:
   openshift:
     oauthProxy:
-      repository: quay.io/openshift/origin-oauth-proxy
-      tag: '4.18'   # Impostare la versione OCP/OKD del proprio cluster
+      registry: quay.io
+      repository: openshift/origin-oauth-proxy
+      tag: '4.22'   # Impostare la versione OCP/OKD del proprio cluster
 ```
 
 8. Cliccare su **Install**
