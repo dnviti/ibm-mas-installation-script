@@ -124,6 +124,25 @@ helm install longhorn longhorn/longhorn \
   --values values.yaml
 ```
 
+## Single Node OpenShift (SNO)
+
+Di default Longhorn crea 3 repliche per volume: su un cluster a nodo singolo le repliche aggiuntive non possono essere schedulate e tutti i volumi restano in stato *Degraded*. Impostare 1 replica (va fatto prima di creare PVC, i parametri della StorageClass non si applicano ai volumi esistenti):
+
+```bash
+cat > longhorn-sno.yaml <<'EOF'
+persistence:
+  defaultClassReplicaCount: 1
+defaultSettings:
+  defaultReplicaCount: '{"v1":"1","v2":"1"}'
+EOF
+
+helm upgrade longhorn longhorn/longhorn -n longhorn-system \
+  --version <versione-installata> --reuse-values -f longhorn-sno.yaml
+
+# Verifica
+oc get sc longhorn -o jsonpath='{.parameters.numberOfReplicas}'
+```
+
 ## Verifica dell'installazione
 
 Controllare che tutti i pod siano in stato Running:

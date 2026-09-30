@@ -6,8 +6,14 @@ Questa directory contiene uno script di installazione configurabile per IBM Maxi
 
 - `install-maximo.sh` - Script principale di installazione
 - `config.yaml` - File di configurazione con tutti i parametri di installazione
-- `pull-secret` - Pull secret per IBM Container Registry (obbligatorio)
-- `license.dat` - File di licenza MAS (obbligatorio)
+- `.secrets/` - Cartella dei file sensibili, **esclusa da git** (`.gitignore`):
+  - `entitlement-key` - IBM Entitlement Key (una riga)
+  - `license.dat` - File di licenza MAS (obbligatorio)
+  - `pull-secret` - Pull secret per IBM Container Registry (deve esistere, ma `mas install` non lo usa)
+  - `kubeconfig-<cluster>` - Kubeconfig del cluster OpenShift
+  - `config.local.yaml` - (opzionale) override di `config.yaml` per dati personali o specifici dell'ambiente
+
+Nomi dei file e cartella sono configurabili nella sezione `files` di `config.yaml`.
 
 ## Prerequisiti
 
@@ -15,8 +21,10 @@ Questa directory contiene uno script di installazione configurabile per IBM Maxi
 2. **Container Engine** - Docker o Podman (lo script rileva automaticamente o usa la preferenza impostata)
 3. **Storage Class** - Longhorn o altro storage persistente deve essere disponibile (vedi [guida installazione Longhorn su OpenShift](LONGHORN.md))
 4. **File obbligatori**:
-   - `pull-secret` - Credenziali per IBM Container Registry
-   - `license.dat` - File di licenza MAS valido
+   - `.secrets/pull-secret` - Credenziali per IBM Container Registry
+   - `.secrets/license.dat` - File di licenza MAS valido
+   - `.secrets/kubeconfig-<cluster>` - Kubeconfig del cluster
+5. **IBM Entitlement Key** - Letta, nell'ordine, da variabile d'ambiente `IBM_ENTITLEMENT_KEY`, `ibm.entitlement_key` in `config.yaml`, file `.secrets/entitlement-key` (consigliato)
 
 ## Configurazione
 
@@ -28,11 +36,12 @@ Modificare `config.yaml` per personalizzare l'installazione:
 ```yaml
 mas:
   instance_id: "masdemosno"      # Identificativo univoco dell'istanza MAS
-  workspace_id: "masdemo"       # Identificativo del workspace
+  workspace_id: "masdemosno"    # Identificativo del workspace
   workspace_name: "MAS Demo"    # Nome visualizzato
-  catalog_version: "v9-250828-amd64"
-  channel: "9.1.x-feature"
+  catalog_version: "v9-260924-amd64"
+  channel: "9.2.x"
   operational_mode: "non-prod"  # non-prod o prod
+  admin_mode: "cluster"         # Obbligatorio per MAS 9.2+ (cluster, namespaced, minimal)
 ```
 
 #### Storage
@@ -51,6 +60,7 @@ mongodb:
 
 db2:
   manage: true
+  channel: "v120105.0"          # Lasciare vuoto per usare il default del catalogo
   namespace: "db2u"
   type: "db2wh"                 # DB2 Warehouse
   memory_requests: "8Gi"
@@ -63,10 +73,13 @@ db2:
 manage:
   install: true
   components: "base=latest,health=latest"
-  server_bundle_size: "dev"     # dev, small, medium, large
+  server_bundle_size: "dev"     # dev, snojms, small, jms
+  demodata: true                # Carica i dati demo di Manage (--manage-demodata)
 
+# Nota: le applicazioni opzionali non sono ancora gestite dallo script,
+# se impostate a true viene solo mostrato un warning
 applications:
-  iot: false                    # Impostare a true per installare
+  iot: false
   monitor: false
   predict: false
   # ... altre applicazioni
@@ -75,20 +88,49 @@ container:
   name: "mas-installer"         # Nome del container
   image: "quay.io/ibmmas/cli:latest"
   network: "host"
-  engine: "auto"                # docker, podman, o auto (rilevamento automatico)
+  engine: "podman"              # docker, podman, o auto (rilevamento automatico)
+
+files:                          # Percorsi relativi a secrets_dir
+  secrets_dir: ".secrets"       # Relativa allo script, oppure percorso assoluto
+  entitlement_key: "entitlement-key"
+  pull_secret: "pull-secret"
+  license: "license.dat"
+  kubeconfig: "kubeconfig-masdemosno"
 ```
+
+#### Image registry interno
+```yaml
+image_registry:
+  configure: true               # Abilita il registry interno se è "Removed"
+  storage_class: ""             # Vuoto = storage.rwo_class
+  size: "100Gi"
+```
+
+Manage costruisce le proprie immagini (admin e server bundle) nel registry interno di OpenShift. Su bare metal/SNO il registry è `Removed` di default e l'installazione resta bloccata su `Builds not complete` (build in errore `InvalidOutputReference`). Lo script lo abilita con un PVC RWO, 1 replica e strategia `Recreate`. Su SNO l'abilitazione riavvia l'API server per un paio di minuti.
+
+#### Override locale
+I valori in `.secrets/config.local.yaml` sovrascrivono quelli di `config.yaml`, con la stessa struttura. Usarlo per i dati che non devono finire su git, ad esempio il contatto UDS:
+```yaml
+uds:
+  email: "nome.cognome@azienda.com"
+  firstname: "Nome"
+  lastname: "Cognome"
+```
+
+I commenti in coda ai valori (`key: "valore" # nota`) sono supportati.
 
 ## Utilizzo
 
 1. **Preparare i file**:
    ```bash
    # Verificare che i file obbligatori siano presenti
-   ls -la pull-secret license.dat config.yaml
+   ls -la .secrets/ config.yaml
    ```
 
-2. **Autenticarsi su OpenShift**:
+2. **Salvare la entitlement key** (da https://myibm.ibm.com/products-services/containerlibrary):
    ```bash
-   oc login https://your-openshift-cluster.com
+   mkdir -p .secrets && chmod 700 .secrets
+   echo '<chiave>' > .secrets/entitlement-key && chmod 600 .secrets/entitlement-key
    ```
 
 3. **Verificare la configurazione**:
@@ -179,15 +221,6 @@ manage:
   server_bundle_size: "large"   # Dimensionamento per produzione
 ```
 
-### Applicazioni multiple
-```yaml
-applications:
-  iot: true
-  monitor: true
-  manage: true
-  predict: true
-```
-
 ## Risoluzione problemi
 
 ### Problemi comuni
@@ -201,14 +234,14 @@ applications:
 2. **Problemi con il pull secret**:
    ```bash
    # Verificare il formato del pull secret
-   cat pull-secret
+   cat .secrets/pull-secret
    # Deve contenere JSON valido con le credenziali del registry
    ```
 
 3. **Problemi con il file di licenza**:
    ```bash
    # Controllare il file di licenza
-   file license.dat
+   file .secrets/license.dat
    # Deve essere un file di licenza binario valido
    ```
 

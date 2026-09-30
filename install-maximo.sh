@@ -7,7 +7,6 @@ set -e
 
 # Directory dello script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LICENSES_DIR="$SCRIPT_DIR/licenses"
 CONFIG_FILE="${SCRIPT_DIR}/config.yaml"
 
 # Colori per l'output
@@ -38,9 +37,11 @@ log_error() {
 parse_yaml() {
     local prefix=$2
     local s='[[:space:]]*' w='[a-zA-Z0-9_]*' fs=$(echo @|tr @ '\034')
+    # Rimuove le righe di commento e i commenti in coda ai valori (es. key: "val" # nota)
+    sed -e '/^[[:space:]]*#/d' -e "s|[[:space:]]\{1,\}#[^\"']*\$||" $1 |
     sed -ne "s|^\($s\):|\1|" \
         -e "s|^\($s\)\($w\)$s:$s[\"']\(.*\)[\"']$s\$|\1$fs\2$fs\3|p" \
-        -e "s|^\($s\)\($w\)$s:$s\(.*\)$s\$|\1$fs\2$fs\3|p" $1 |
+        -e "s|^\($s\)\($w\)$s:$s\(.*\)$s\$|\1$fs\2$fs\3|p" |
     awk -F$fs '{
         indent = length($1)/2;
         vname[indent] = $2;
@@ -56,8 +57,25 @@ parse_yaml() {
 load_config() {
     log_info "Loading configuration from $CONFIG_FILE..."
 
+    # Verifica se il file di configurazione esiste
+    if [ ! -f "$CONFIG_FILE" ]; then
+        log_error "Configuration file not found: $CONFIG_FILE"
+        exit 1
+    fi
+
     # Utilizza parsing YAML di base
-    eval $(parse_yaml "$CONFIG_FILE")
+    eval "$(parse_yaml "$CONFIG_FILE")"
+
+    # Override locale (non versionato) nella cartella dei secret
+    local secrets_dir="${files_secrets_dir:-.secrets}"
+    if [[ "$secrets_dir" != /* ]]; then
+        secrets_dir="${SCRIPT_DIR}/${secrets_dir}"
+    fi
+    LOCAL_CONFIG_FILE="${secrets_dir}/config.local.yaml"
+    if [ -f "$LOCAL_CONFIG_FILE" ]; then
+        log_info "Applying local overrides from $LOCAL_CONFIG_FILE"
+        eval "$(parse_yaml "$LOCAL_CONFIG_FILE")"
+    fi
 
     MAS_INSTANCE_ID="$mas_instance_id"
     MAS_WORKSPACE_ID="$mas_workspace_id"
@@ -67,8 +85,8 @@ load_config() {
     MAS_CATALOG_VERSION="$mas_catalog_version"
     MAS_CHANNEL="$mas_channel"
     MAS_OPERATIONAL_MODE="$mas_operational_mode"
+    MAS_ADMIN_MODE="$mas_admin_mode"
 
-    IBM_ENTITLEMENT_KEY="$ibm_entitlement_key"
 
     STORAGE_RWO_CLASS="$storage_rwo_class"
     STORAGE_RWX_CLASS="$storage_rwx_class"
@@ -100,18 +118,48 @@ load_config() {
     MANAGE_JDBC="$manage_jdbc"
     MANAGE_COMPONENTS="$manage_components"
     MANAGE_SERVER_BUNDLE_SIZE="$manage_server_bundle_size"
+    MANAGE_DEMODATA="$manage_demodata"
 
-    PULL_SECRET_FILE="$files_pull_secret"
-    LICENSE_FILE="$files_license"
+    SECRETS_DIR="${files_secrets_dir:-.secrets}"
+    ENTITLEMENT_KEY_FILE="${files_entitlement_key:-entitlement-key}"
+    PULL_SECRET_FILE="${files_pull_secret:-pull-secret}"
+    LICENSE_FILE="${files_license:-license.dat}"
+    KUBECONFIG_FILE="${files_kubeconfig:-kubeconfig}"
 
     CONTAINER_NAME="$container_name"
     CONTAINER_IMAGE="$container_image"
     CONTAINER_NETWORK="$container_network"
     CONTAINER_ENGINE_PREFERENCE="$container_engine"
 
+    REGISTRY_CONFIGURE="${image_registry_configure:-true}"
+    REGISTRY_STORAGE_CLASS="${image_registry_storage_class:-$storage_rwo_class}"
+    REGISTRY_SIZE="${image_registry_size:-100Gi}"
+
     # Risolve i percorsi relativi dei file
-    PULL_SECRET_PATH="${LICENSES_DIR}/${PULL_SECRET_FILE}"
-    LICENSE_PATH="${LICENSES_DIR}/${LICENSE_FILE}"
+    # I file sensibili sono relativi alla cartella dei secret (relativa allo script se non assoluta)
+    if [[ "$SECRETS_DIR" != /* ]]; then
+        SECRETS_DIR="${SCRIPT_DIR}/${SECRETS_DIR}"
+    fi
+    ENTITLEMENT_KEY_PATH="${SECRETS_DIR}/${ENTITLEMENT_KEY_FILE}"
+    PULL_SECRET_PATH="${SECRETS_DIR}/${PULL_SECRET_FILE}"
+    LICENSE_PATH="${SECRETS_DIR}/${LICENSE_FILE}"
+    KUBECONFIG_PATH="${SECRETS_DIR}/${KUBECONFIG_FILE}"
+
+    # Entitlement key: variabile d'ambiente, poi config.yaml, poi file in SECRETS_DIR
+    if [ -n "$IBM_ENTITLEMENT_KEY" ]; then
+        ENTITLEMENT_KEY_SOURCE="environment variable IBM_ENTITLEMENT_KEY"
+    elif [ -n "$ibm_entitlement_key" ]; then
+        IBM_ENTITLEMENT_KEY="$ibm_entitlement_key"
+        ENTITLEMENT_KEY_SOURCE="config.yaml (ibm.entitlement_key)"
+    elif [ -f "$ENTITLEMENT_KEY_PATH" ]; then
+        IBM_ENTITLEMENT_KEY="$(tr -d '[:space:]' < "$ENTITLEMENT_KEY_PATH")"
+        ENTITLEMENT_KEY_SOURCE="$ENTITLEMENT_KEY_PATH"
+    fi
+
+    # Usa lo stesso kubeconfig anche per i comandi oc eseguiti sull'host
+    if [ -f "$KUBECONFIG_PATH" ]; then
+        export KUBECONFIG="$KUBECONFIG_PATH"
+    fi
 
     log_success "Configuration loaded successfully"
 }
@@ -119,12 +167,6 @@ load_config() {
 # Funzione per verificare i prerequisiti
 check_prerequisites() {
     log_info "Checking prerequisites..."
-
-    # Verifica se il file di configurazione esiste
-    if [ ! -f "$CONFIG_FILE" ]; then
-        log_error "Configuration file not found: $CONFIG_FILE"
-        exit 1
-    fi
 
     # Verifica se OpenShift CLI è disponibile
     if ! command -v oc &> /dev/null; then
@@ -177,7 +219,17 @@ check_prerequisites() {
 validate_config() {
     log_info "Validating configuration..."
 
+    if [ -z "$IBM_ENTITLEMENT_KEY" ]; then
+        log_error "IBM entitlement key not set: save it in $ENTITLEMENT_KEY_PATH (or use IBM_ENTITLEMENT_KEY / ibm.entitlement_key)"
+        exit 1
+    fi
+
     # Verifica i file richiesti
+    if [ ! -f "$KUBECONFIG_PATH" ]; then
+        log_error "Kubeconfig file not found: $KUBECONFIG_PATH"
+        exit 1
+    fi
+
     if [ ! -f "$PULL_SECRET_PATH" ]; then
         log_error "Pull secret file not found: $PULL_SECRET_PATH"
         exit 1
@@ -196,7 +248,72 @@ validate_config() {
         exit 1
     fi
 
+    # Le applicazioni opzionali non sono ancora gestite dallo script
+    local app
+    for app in iot monitor predict optimizer assist visual_inspection facilities; do
+        local var="applications_${app}"
+        if [ "${!var}" = "true" ]; then
+            log_warning "applications.${app} is set to true but is not supported by this script: it will NOT be installed"
+        fi
+    done
+
     log_success "Configuration validation completed"
+}
+
+# Funzione per configurare l'image registry interno di OpenShift
+# Manage esegue build con output su ImageStream: senza registry fallisce con
+# "Builds not complete" / InvalidOutputReference
+configure_image_registry() {
+    if [ "$REGISTRY_CONFIGURE" != "true" ]; then
+        log_info "Skipping image registry configuration (image_registry.configure=false)"
+        return 0
+    fi
+
+    log_info "Checking OpenShift integrated image registry..."
+
+    local state
+    state=$(oc get configs.imageregistry.operator.openshift.io cluster -o jsonpath='{.spec.managementState}')
+    if [ "$state" = "Managed" ]; then
+        log_success "Image registry already enabled (managementState=Managed)"
+        return 0
+    fi
+
+    log_info "Image registry is '$state': enabling it with a ${REGISTRY_SIZE} PVC on '$REGISTRY_STORAGE_CLASS'"
+
+    if ! oc get pvc image-registry-storage -n openshift-image-registry &> /dev/null; then
+        cat <<EOF | oc apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: image-registry-storage
+  namespace: openshift-image-registry
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ${REGISTRY_STORAGE_CLASS}
+  resources:
+    requests:
+      storage: ${REGISTRY_SIZE}
+EOF
+    fi
+
+    # Con un PVC ReadWriteOnce il registry deve avere 1 replica e strategia Recreate
+    oc patch configs.imageregistry.operator.openshift.io cluster --type merge \
+        -p '{"spec":{"managementState":"Managed","replicas":1,"rolloutStrategy":"Recreate","storage":{"pvc":{"claim":"image-registry-storage"}}}}'
+
+    log_info "Waiting for image registry to become available..."
+    local i
+    for i in $(seq 1 60); do
+        if [ "$(oc get co image-registry -o jsonpath='{.status.conditions[?(@.type=="Available")].status}')" = "True" ] &&
+           [ "$(oc get co image-registry -o jsonpath='{.status.conditions[?(@.type=="Progressing")].status}')" = "False" ]; then
+            log_success "Image registry configured"
+            return 0
+        fi
+        sleep 10
+    done
+
+    log_error "Image registry did not become available within 10 minutes"
+    oc get co image-registry
+    exit 1
 }
 
 # Funzione per visualizzare il riepilogo della configurazione
@@ -211,10 +328,16 @@ display_summary() {
     echo "Catalog Version: $MAS_CATALOG_VERSION"
     echo "Channel: $MAS_CHANNEL"
     echo "Operational Mode: $MAS_OPERATIONAL_MODE"
+    echo "Admin Mode: ${MAS_ADMIN_MODE:-<none>}"
     echo "RWO Storage Class: $STORAGE_RWO_CLASS"
     echo "RWX Storage Class: $STORAGE_RWX_CLASS"
     echo "MongoDB Namespace: $MONGODB_NAMESPACE"
     echo "DB2 Namespace: $DB2_NAMESPACE"
+    echo "Manage Demo Data: ${MANAGE_DEMODATA:-false}"
+    echo "Secrets Dir: $SECRETS_DIR"
+    echo "Entitlement Key: from $ENTITLEMENT_KEY_SOURCE"
+    echo "Kubeconfig: $KUBECONFIG_PATH"
+    echo "Configure Image Registry: $REGISTRY_CONFIGURE (${REGISTRY_SIZE} on ${REGISTRY_STORAGE_CLASS})"
     echo "======================================"
     echo ""
 }
@@ -265,7 +388,7 @@ setup_container() {
 
     # Copia i file
     log_info "Copying configuration files to container..."
-    $CONTAINER_ENGINE cp "${SCRIPT_DIR}/kubeconfig" "${CONTAINER_NAME}:/root/.kube/config"
+    $CONTAINER_ENGINE cp "$KUBECONFIG_PATH" "${CONTAINER_NAME}:/root/.kube/config"
     $CONTAINER_ENGINE cp "$PULL_SECRET_PATH" "${CONTAINER_NAME}:/mascli/masconfig/pull-secret"
     $CONTAINER_ENGINE cp "$LICENSE_PATH" "${CONTAINER_NAME}:/mascli/masconfig/license.dat"
 
@@ -294,6 +417,11 @@ build_install_command() {
         cmd="$cmd --non-prod"
     fi
 
+    # Richiesto da MAS 9.2+, non supportato da 9.1 e precedenti
+    if [ -n "$MAS_ADMIN_MODE" ]; then
+        cmd="$cmd --admin-mode '$MAS_ADMIN_MODE'"
+    fi
+
     cmd="$cmd --storage-class-rwo '$STORAGE_RWO_CLASS'"
     cmd="$cmd --storage-class-rwx '$STORAGE_RWX_CLASS'"
     cmd="$cmd --storage-pipeline '$STORAGE_PIPELINE_CLASS'"
@@ -309,11 +437,17 @@ build_install_command() {
         cmd="$cmd --manage-jdbc '$MANAGE_JDBC'"
         cmd="$cmd --manage-components '$MANAGE_COMPONENTS'"
         cmd="$cmd --manage-server-bundle-size '$MANAGE_SERVER_BUNDLE_SIZE'"
+        if [ "$MANAGE_DEMODATA" = "true" ]; then
+            cmd="$cmd --manage-demodata"
+        fi
     fi
 
     if [ "$DB2_MANAGE" = "true" ]; then
         cmd="$cmd --db2-manage"
-        cmd="$cmd --db2-channel '$DB2_CHANNEL'"
+        # Se vuoto viene usato il canale di default del catalogo
+        if [ -n "$DB2_CHANNEL" ]; then
+            cmd="$cmd --db2-channel '$DB2_CHANNEL'"
+        fi
         cmd="$cmd --db2-namespace '$DB2_NAMESPACE'"
         cmd="$cmd --db2-type '$DB2_TYPE'"
         cmd="$cmd --db2-cpu-requests '$DB2_CPU_REQUESTS'"
@@ -383,8 +517,8 @@ main() {
     echo "IBM Maximo Application Suite - Script di Installazione Configurabile"
     echo "============================================================="
 
-    check_prerequisites
     load_config
+    check_prerequisites
     validate_config
     display_summary
 
@@ -392,6 +526,7 @@ main() {
     log_info "Procedendo automaticamente con l'installazione..."
 
     cleanup_existing
+    configure_image_registry
     setup_container
 
     if run_installation; then

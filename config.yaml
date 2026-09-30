@@ -2,16 +2,20 @@
 
 # MAS Instance Configuration
 mas:
-  instance_id: "masdemo"
-  workspace_id: "masdemo"
+  instance_id: "masdemosno"
+  workspace_id: "masdemosno"
   workspace_name: "MAS Demo"
   ocp_project: ""
   net_domain: ""
-  catalog_version: "v9-250828-amd64"
-  channel: "9.1.x-feature"
-  operational_mode: "non-prod"  # non-prod or prod
+  catalog_version: "v9-260924-amd64"
+  channel: "9.2.x"
+  operational_mode: "non-prod" # non-prod or prod
+  # Obbligatorio per MAS 9.2+ (cluster, namespaced, minimal); lasciare vuoto per 9.1 e precedenti
+  admin_mode: "cluster"
 
 # IBM Entitlement
+# Ordine di lettura: variabile d'ambiente IBM_ENTITLEMENT_KEY, questo campo,
+# file files.entitlement_key. Consigliato: lasciare vuoto e usare il file in .secrets/
 ibm:
   entitlement_key: ""
 
@@ -23,6 +27,7 @@ storage:
   access_mode: "ReadWriteOnce"
 
 # User Data Service Configuration
+# Valori reali in .secrets/config.local.yaml (vedi sotto)
 uds:
   email: "email@example.com"
   firstname: "NOME"
@@ -34,7 +39,7 @@ mongodb:
 
 db2:
   manage: true
-  channel: "v110509.0"
+  channel: "v120105.0" # default del catalogo v9-260924-amd64
   namespace: "db2u"
   type: "db2wh"
   cpu_requests: "300m"
@@ -50,12 +55,13 @@ db2:
 # Maximo Manage Application Configuration
 manage:
   install: true
-  channel: "9.1.x-feature"
+  channel: "9.2.x"
   jdbc: "workspace-application"
   components: "base=latest,health=latest"
   server_bundle_size: "dev"
+  demodata: true # carica i dati demo (MAXDEMO) in Manage
 
-# Optional Applications (set to true to install)
+# Optional Applications (NON ancora gestite dallo script: i flag vengono ignorati)
 applications:
   iot: false
   monitor: false
@@ -65,10 +71,23 @@ applications:
   visual_inspection: false
   facilities: false
 
-# File paths (relative to script location)
+# File sensibili: percorsi relativi a files.secrets_dir (cartella esclusa da git)
+# Se esiste <secrets_dir>/config.local.yaml, i suoi valori sovrascrivono quelli di
+# questo file: usarlo per dati personali o specifici dell'ambiente (es. uds.*)
 files:
+  secrets_dir: ".secrets"
+  entitlement_key: "entitlement-key"
   pull_secret: "pull-secret"
   license: "license.dat"
+  kubeconfig: "kubeconfig-masdemosno"
+
+# OpenShift Integrated Image Registry
+# Richiesto da Manage per le build delle immagini (admin/server bundle).
+# Su bare metal/SNO il registry è "Removed" di default: lo script lo abilita con un PVC.
+image_registry:
+  configure: true
+  storage_class: "" # vuoto = storage.rwo_class
+  size: "100Gi"
 
 # Container Configuration
 container:
@@ -76,4 +95,4 @@ container:
   image: "quay.io/ibmmas/cli:latest"
   network: "host"
   # Engine preference: "docker", "podman", or "auto" (auto-detect)
-  engine: "auto"
+  engine: "podman"
