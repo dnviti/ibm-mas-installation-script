@@ -88,10 +88,6 @@ helm repo update
 ```yaml
 openshift:
   enabled: true
-  ui:
-    route: longhorn-ui
-    port: 443
-    proxy: 8443
 
 image:
   openshift:
