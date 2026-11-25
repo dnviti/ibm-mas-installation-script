@@ -83,6 +83,41 @@ files:
   license: "license.dat"
   kubeconfig: "kubeconfig-masdemosno"
 
+# Pre-configurazione del cluster (fasi "preflight" e "cluster" dello script)
+# Con il solo kubeconfig lo script prepara il cluster prima di mas install.
+# Tutti i comandi oc/helm girano nel container MAS CLI (sull'host non serve oc).
+cluster:
+  # false = salta Longhorn e StorageClass di default (l'image registry segue image_registry.configure)
+  configure: true
+  # StorageClass che deve essere l'UNICA di default; vuoto = storage.rwo_class
+  default_storage_class: ""
+  # Helm 3 scaricato nel container (da get.helm.sh) SOLO se il container non ha già helm:
+  # l'immagine mas CLI di solito lo include e in quel caso helm_version non viene usato.
+  # Il controllo sha256 verifica solo l'integrità del download (il checksum arriva dallo stesso host)
+  helm_version: "3.19.0"
+  longhorn:
+    # false = Longhorn gestito altrove: lo script non lo installa e non ne tocca le impostazioni
+    install: true
+    # Un'installazione Longhorn già presente nel namespace NON viene mai aggiornata
+    version: "1.13.0"
+    namespace: "longhorn-system"
+    # 1 per Single Node OpenShift; i parametri della StorageClass sono immutabili dopo la creazione
+    replica_count: 1
+    # Tag di quay.io/openshift/origin-oauth-proxy; vuoto = major.minor del cluster (es. 4.22)
+    oauth_proxy_tag: ""
+    # Impostazioni Longhorn (vuoto = non toccare). Su una nuova installazione vanno nei values Helm
+    # (defaultSettings.priorityClass / storageMinimalAvailablePercentage). Su un Longhorn già presente
+    # vengono patchate ad ogni esecuzione, ma longhorn-manager le riporta al valore del chart
+    # (ConfigMap longhorn-default-setting) al riavvio: lo script lo segnala con un avviso
+    settings:
+      priority_class: "system-node-critical"
+      storage_minimal_available_percentage: 10
+  # Controlli della fase preflight (sola lettura)
+  preflight:
+    min_cpu: 16 # CPU allocabili minime, somma dei nodi Ready
+    min_memory_gib: 48 # memoria allocabile minima in GiB, somma dei nodi Ready
+    check_dns: true # api.<dominio> e un host *.apps devono risolvere dal container
+
 # OpenShift Integrated Image Registry
 # Richiesto da Manage per le build delle immagini (admin/server bundle).
 # Su bare metal/SNO il registry è "Removed" di default: lo script lo abilita con un PVC.
