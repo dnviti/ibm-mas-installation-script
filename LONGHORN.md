@@ -1,42 +1,16 @@
 # Installazione di Longhorn su OpenShift
 
-Guida all'installazione di [Longhorn](https://longhorn.io/) come storage distribuito su OpenShift Container Platform (OCP) tramite la console di sviluppatore.
+Guida all'installazione di [Longhorn](https://longhorn.io/) come storage distribuito su OpenShift Container Platform (OCP).
+
+> **Automatizzato**: `install-maximo.sh` (fase `cluster`) esegue gia tutto quello che segue (installazione Helm con i values per SNO, impostazioni Longhorn, StorageClass di default) partendo dal solo kubeconfig, vedi [README.md](README.md). Questa guida resta come riferimento per l'installazione manuale.
 
 ## Prerequisiti
 
-### 1. iSCSI
+Su OpenShift/RHCOS non servono interventi manuali sui nodi:
 
-Longhorn richiede che `open-iscsi` sia installato e il demone `iscsid` sia attivo su tutti i nodi worker. Su RHEL/CoreOS (nodi OpenShift):
-
-```bash
-dnf --setopt=tsflags=noscripts install iscsi-initiator-utils
-echo "InitiatorName=$(/sbin/iscsi-iname)" > /etc/iscsi/initiatorname.iscsi
-systemctl enable iscsid
-systemctl start iscsid
-```
-
-Per verificare che il modulo kernel sia caricato:
-
-```bash
-modprobe iscsi_tcp
-```
-
-### 2. Security Context Constraints (SCC)
-
-Longhorn necessita di privilegi elevati per funzionare correttamente. Configurare le SCC prima dell'installazione:
-
-```bash
-oc adm policy add-scc-to-user anyuid -z default -n longhorn-system
-oc adm policy add-scc-to-user privileged -z longhorn-service-account -n longhorn-system
-```
-
-### 3. Label dei nodi
-
-Etichettare i nodi worker su cui Longhorn deve creare i dischi di storage:
-
-```bash
-oc label node <nome-nodo-worker> node.longhorn.io/create-default-disk=true
-```
+- **iSCSI / NFS**: `iscsi-initiator-utils`, `nfs-utils`, `cryptsetup` e `device-mapper` sono gia presenti in RHCOS (Longhorn riporta `RequiredPackages=True`). Il vecchio passo `dnf install iscsi-initiator-utils` non va eseguito: RHCOS ha un filesystem immutabile e `dnf` non e utilizzabile. Per un controllo, dopo l'installazione guardare le condizioni delle risorse `nodes.longhorn.io`.
+- **Security Context Constraints (SCC)**: con `openshift.enabled=true` il chart Helm crea da solo il ruolo `longhorn-ocp-privileged-role` (SCC `anyuid` e `privileged`) e i relativi binding, quindi i comandi `oc adm policy add-scc-to-user ...` non servono.
+- **Label dei nodi**: l'etichetta `node.longhorn.io/create-default-disk=true` e inutile con le impostazioni di default (`create-default-disk-labeled-nodes=false`: Longhorn crea il disco di default su tutti i nodi), quindi non va applicata.
 
 ## Aggiungere la repository Helm di Longhorn alla console OpenShift
 
@@ -94,54 +68,58 @@ image:
     oauthProxy:
       registry: quay.io
       repository: openshift/origin-oauth-proxy
-      tag: '4.22'   # Impostare la versione OCP/OKD del proprio cluster
+      tag: '4.22'   # major.minor del cluster OCP/OKD (lo script lo ricava da solo)
 ```
 
 8. Cliccare su **Install**
 
-## Installazione alternativa tramite CLI
+## Installazione alternativa tramite CLI (riferimento di quanto fa lo script)
 
-Se si preferisce installare da riga di comando:
-
-```bash
-oc create namespace longhorn-system
-
-helm install longhorn longhorn/longhorn \
-  --namespace longhorn-system \
-  --set openshift.enabled=true \
-  --set openshift.ui.route=longhorn-ui \
-  --set openshift.ui.port=443 \
-  --set openshift.ui.proxy=8443 \
-  --set image.openshift.oauthProxy.repository=quay.io/openshift/origin-oauth-proxy \
-  --set image.openshift.oauthProxy.tag=4.18
-```
-
-Oppure con un file `values.yaml`:
+Valori per Single Node OpenShift (SNO) e installazione con Helm. Per SNO va impostata 1 replica **prima** di creare PVC: di default Longhorn ne crea 3, su un cluster a nodo singolo le repliche aggiuntive non possono essere schedulate e tutti i volumi restano in stato *Degraded* (i parametri della StorageClass non si applicano ai volumi esistenti).
 
 ```bash
-helm install longhorn longhorn/longhorn \
-  --namespace longhorn-system \
-  --values values.yaml
-```
-
-## Single Node OpenShift (SNO)
-
-Di default Longhorn crea 3 repliche per volume: su un cluster a nodo singolo le repliche aggiuntive non possono essere schedulate e tutti i volumi restano in stato *Degraded*. Impostare 1 replica (va fatto prima di creare PVC, i parametri della StorageClass non si applicano ai volumi esistenti):
-
-```bash
-cat > longhorn-sno.yaml <<'EOF'
+cat > longhorn-values.yaml <<'EOF'
+openshift:
+  enabled: true
+image:
+  openshift:
+    oauthProxy:
+      registry: quay.io
+      repository: openshift/origin-oauth-proxy
+      tag: "4.22"   # major.minor del cluster OCP/OKD
 persistence:
+  defaultClass: true
   defaultClassReplicaCount: 1
 defaultSettings:
   defaultReplicaCount: '{"v1":"1","v2":"1"}'
+  priorityClass: "system-node-critical"
+  storageMinimalAvailablePercentage: 10
 EOF
 
-helm upgrade longhorn longhorn/longhorn -n longhorn-system \
-  --version <versione-installata> --reuse-values -f longhorn-sno.yaml
+helm repo add longhorn https://charts.longhorn.io
+helm repo update longhorn
+helm install longhorn longhorn/longhorn \
+  --version 1.13.0 \
+  --namespace longhorn-system --create-namespace \
+  --values longhorn-values.yaml
 
 # Verifica
 oc get sc longhorn -o jsonpath='{.parameters.numberOfReplicas}'
 ```
+
+Impostazioni Longhorn gestite dallo script (modificabili in `cluster.longhorn.settings` di `config.yaml`): `priority-class` e `storage-minimal-available-percentage`. Vanno messe **nei values Helm** (`defaultSettings.priorityClass`, `defaultSettings.storageMinimalAvailablePercentage`, come sopra): una `patch` diretta della setting viene annullata al successivo riavvio di `longhorn-manager`, che ri-sincronizza le setting dalla ConfigMap `longhorn-default-setting` generata dal chart (di default `priorityClass: longhorn-critical`). Su un'installazione esistente la patch e utile solo come misura temporanea:
+
+```bash
+oc -n longhorn-system patch settings.longhorn.io priority-class --type merge -p '{"value":"system-node-critical"}'
+oc -n longhorn-system patch settings.longhorn.io storage-minimal-available-percentage --type merge -p '{"value":"10"}'
+
+# per renderle permanenti
+helm upgrade longhorn longhorn/longhorn -n longhorn-system --version <versione-installata> --reuse-values \
+  --set-string defaultSettings.priorityClass=system-node-critical \
+  --set-string defaultSettings.storageMinimalAvailablePercentage=10
+```
+
+La StorageClass `longhorn` deve essere l'unica di default (annotazione `storageclass.kubernetes.io/is-default-class`).
 
 ## Verifica dell'installazione
 
@@ -167,7 +145,7 @@ oc get route -n longhorn-system
 
 - Longhorn deve essere installato esclusivamente nel namespace `longhorn-system`
 - Il proxy OAuth protegge l'accesso alla UI di Longhorn tramite l'autenticazione OpenShift
-- Il tag dell'immagine `oauthProxy` deve corrispondere alla versione del cluster OCP/OKD (es. `4.18`)
+- Il tag dell'immagine `oauthProxy` deve corrispondere alla versione del cluster OCP/OKD (major.minor, es. `4.22`)
 - Per il supporto volumi RWX, assicurarsi che il client NFSv4 sia installato su tutti i nodi
 
 ## Riferimenti

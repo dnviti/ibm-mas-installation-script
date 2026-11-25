@@ -17,14 +17,21 @@ Nomi dei file e cartella sono configurabili nella sezione `files` di `config.yam
 
 ## Prerequisiti
 
-1. **OpenShift CLI (`oc`)** - Deve essere installata e autenticata sul cluster OpenShift
-2. **Container Engine** - Docker o Podman (lo script rileva automaticamente o usa la preferenza impostata)
-3. **Storage Class** - Longhorn o altro storage persistente deve essere disponibile (vedi [guida installazione Longhorn su OpenShift](LONGHORN.md))
-4. **File obbligatori**:
+Sull'host servono **solo**:
+
+1. **Container Engine** - Docker o Podman (lo script rileva automaticamente o usa la preferenza impostata)
+2. **Kubeconfig** del cluster (`.secrets/kubeconfig-<cluster>`) con permessi cluster-admin
+
+Non servono `oc`, `helm` o login sul cluster: ogni comando `oc`/`helm` gira **dentro il container MAS CLI**. L'immagine MAS CLI di solito include gia `helm` (in tal caso `cluster.helm_version` non e usato); se manca, lo script scarica nel container (non sull'host) una release Helm 3 fissata da `get.helm.sh` e confronta lo sha256 pubblicato (il checksum arriva dallo stesso host: e solo un controllo di integrita del download, non di autenticita).
+
+Storage (Longhorn), StorageClass di default e image registry vengono preparati dallo script (fase `cluster`, vedi sotto): non serve installare nulla a mano sul cluster (la guida [LONGHORN.md](LONGHORN.md) resta come riferimento per l'installazione manuale).
+
+Per la fase `install` servono inoltre:
+
+3. **File obbligatori**:
    - `.secrets/pull-secret` - Credenziali per IBM Container Registry
    - `.secrets/license.dat` - File di licenza MAS valido
-   - `.secrets/kubeconfig-<cluster>` - Kubeconfig del cluster
-5. **IBM Entitlement Key** - Letta, nell'ordine, da variabile d'ambiente `IBM_ENTITLEMENT_KEY`, `ibm.entitlement_key` in `config.yaml`, file `.secrets/entitlement-key` (consigliato)
+4. **IBM Entitlement Key** - Letta, nell'ordine, da variabile d'ambiente `IBM_ENTITLEMENT_KEY`, `ibm.entitlement_key` in `config.yaml`, file `.secrets/entitlement-key` (consigliato)
 
 ## Configurazione
 
@@ -98,6 +105,36 @@ files:                          # Percorsi relativi a secrets_dir
   kubeconfig: "kubeconfig-masdemosno"
 ```
 
+#### Pre-configurazione del cluster
+```yaml
+cluster:
+  configure: true               # false = salta Longhorn e StorageClass di default
+  default_storage_class: ""     # StorageClass che deve essere l'UNICA di default; vuoto = storage.rwo_class
+  helm_version: "3.19.0"        # Helm scaricato nel container solo se manca
+  longhorn:
+    install: true               # false = Longhorn gestito altrove
+    version: "1.13.0"
+    namespace: "longhorn-system"
+    replica_count: 1            # 1 per SNO (immutabile nella StorageClass dopo la creazione)
+    oauth_proxy_tag: ""         # vuoto = major.minor del cluster (es. 4.22)
+    settings:                   # allineate a ogni esecuzione; vuoto = non toccare
+      priority_class: "system-node-critical"
+      storage_minimal_available_percentage: 10
+  preflight:
+    min_cpu: 16                 # CPU allocabili minime (somma dei nodi Ready)
+    min_memory_gib: 48          # memoria allocabile minima in GiB (somma dei nodi Ready)
+    check_dns: true             # api.<dominio> e un host *.apps devono risolvere
+```
+
+La fase `cluster` esegue, nell'ordine:
+
+1. **Longhorn** (chart `longhorn/longhorn`, `openshift.enabled=true`, 1 replica, tag oauth-proxy = versione del cluster). Il rilevamento e *fail closed*: legge le release Helm `longhorn` nel namespace (label `owner=helm,name=longhorn`, `status`). `deployed` = gia installato, **si salta e non si aggiorna**; un altro stato (`failed`, `pending-*`, ...) o un errore API terminano lo script con istruzioni; nessuna release ma DaemonSet `longhorn-manager` presente = installato fuori da Helm, si salta con un avviso; altrimenti `helm install`. Poi attende che deployment (la UI `longhorn-ui` e solo un avviso), DaemonSet e nodi Longhorn siano pronti, e in caso di timeout mostra `oc get pods`. Non servono MachineConfig, pacchetti sui nodi (RHCOS include iscsi), comandi `oc adm policy` (il chart concede le SCC) ne label sui nodi.
+2. **Impostazioni Longhorn** `priority-class` e `storage-minimal-available-percentage`: su una nuova installazione sono nei values Helm (`defaultSettings.priorityClass`, `defaultSettings.storageMinimalAvailablePercentage`), perche una patch diretta verrebbe annullata da longhorn-manager al riavvio (ri-sincronizza la ConfigMap `longhorn-default-setting` del chart). Su un Longhorn gia presente vengono patchate se diverse, con un avviso (e il comando `helm upgrade --reuse-values --set-string ...` da usare) se la ConfigMap ha un valore diverso. Con `cluster.longhorn.install: false` non vengono toccate.
+3. **StorageClass di default**: attende la StorageClass configurata e la rende l'unica di default (le altre vengono impostate a non-default).
+4. **Image registry** (vedi sotto).
+
+La fase `preflight` e in **sola lettura** e controlla: versione e stato di ClusterVersion, nodi Ready, CPU/memoria allocabili rispetto ai minimi configurati, risoluzione DNS di `api.<dominio>` e di un host `*.apps` (dal container), permessi cluster-admin (`oc auth can-i '*' '*'`), ClusterOperator non degradati/non disponibili. Se un controllo fallisce lo script termina prima di modificare qualsiasi cosa.
+
 #### Image registry interno
 ```yaml
 image_registry:
@@ -119,6 +156,30 @@ uds:
 
 I commenti in coda ai valori (`key: "valore" # nota`) sono supportati.
 
+**Attenzione**: i valori vuoti in `config.local.yaml` (`chiave: ""`) **non** sovrascrivono i valori non vuoti di `config.yaml`, perche il parser scarta le chiavi vuote. Per ottenere un valore vuoto, svuotarlo direttamente in `config.yaml`.
+
+## Fasi e opzioni da riga di comando
+
+| Fase | Cosa fa |
+|------|---------|
+| `preflight` | Controlli in sola lettura sul cluster |
+| `cluster` | Longhorn (Helm), impostazioni Longhorn, StorageClass di default, image registry |
+| `install` | `mas install` (Db2, MongoDB, SLS, MAS Core, Manage) |
+
+Di default vengono eseguite tutte le fasi, in questo ordine.
+
+| Opzione | Effetto |
+|---------|---------|
+| `--only <elenco>` | Esegue solo le fasi indicate (separate da virgola), es. `--only preflight,cluster` |
+| `--skip <elenco>` | Salta le fasi indicate (applicato dopo `--only`), es. `--skip install` |
+| `--clean` | Elimina i namespace MAS esistenti **prima** di `cluster`/`install` (distruttivo). Chiede di digitare l'instance id; da stdin non interattivo richiede `--yes` |
+| `--yes` | Non chiede conferma (solo per `--clean`) |
+| `-h`, `--help` | Mostra l'help |
+
+Fasi o opzioni non valide terminano con errore (exit 2) prima di qualsiasi accesso al cluster o al container.
+
+`--clean` e l'unico modo per ripulire: non avviene piu in automatico. Elimina solo i namespace `mas-<instance_id>-*`, quello di MongoDB (`mongodb.namespace`), quello di Db2 (`db2.namespace`) e `ibm-sls`, con regex ancorata. Un errore nell'elenco dei namespace interrompe la pulizia; a fine pulizia lo script rielenca i namespace e termina con errore se ne resta qualcuno (es. in `Terminating` bloccato da finalizer).
+
 ## Utilizzo
 
 1. **Preparare i file**:
@@ -139,22 +200,30 @@ I commenti in coda ai valori (`key: "valore" # nota`) sono supportati.
    vi config.yaml
    ```
 
-4. **Avviare l'installazione**:
+4. **Controllare il cluster** (sola lettura, consigliato come prima esecuzione):
+   ```bash
+   ./install-maximo.sh --only preflight
+   ```
+
+5. **Avviare l'installazione** (tutte le fasi):
    ```bash
    ./install-maximo.sh
+   # oppure solo la preparazione del cluster
+   ./install-maximo.sh --only cluster
    ```
 
 ## Processo di installazione
 
 Lo script esegue i seguenti passaggi:
 
-1. **Controllo prerequisiti** - Verifica strumenti, connessione al cluster, file
-2. **Caricamento configurazione** - Analizza la configurazione YAML
-3. **Validazione** - Controlla le storage class e l'accessibilita dei file
-4. **Pulizia** - Rimuove eventuali installazioni MAS preesistenti
-5. **Setup container** - Avvia il container MAS CLI con la configurazione corretta
-6. **Esecuzione installazione** - Esegue l'installazione completa di MAS
-7. **Completamento** - Fornisce lo stato e i passaggi successivi
+1. **Caricamento configurazione** - Analizza la configurazione YAML e gli argomenti
+2. **Controllo prerequisiti e validazione** - Container engine, kubeconfig e (per `install`) entitlement key, pull secret, licenza
+3. **Setup container** - Scarica l'immagine e avvia il container MAS CLI con il kubeconfig (tutti gli accessi al cluster passano da qui)
+4. **Fase `preflight`** - Controlli in sola lettura
+5. **Pulizia** - Solo con `--clean`
+6. **Fase `cluster`** - Longhorn, StorageClass di default, image registry
+7. **Fase `install`** - Esegue l'installazione completa di MAS
+8. **Completamento** - Fornisce lo stato e i passaggi successivi. Il container resta attivo dopo `install` per il troubleshooting; se `install` non e tra le fasi viene rimosso a fine esecuzione
 
 ## Durata prevista
 
@@ -175,6 +244,8 @@ Dopo un'installazione riuscita:
 
 2. **Monitorare l'installazione**:
    ```bash
+   # I comandi oc si eseguono nel container MAS CLI (es. podman exec -it mas-installer oc ...)
+   # oppure con un oc locale e lo stesso kubeconfig
    # Controllare i pod in tutti i namespace
    oc get pods -A | grep mas
 
@@ -227,7 +298,8 @@ manage:
 
 1. **Storage Class non trovata**:
    ```bash
-   oc get storageclass
+   # Dall'host, con il container attivo: podman exec mas-installer oc get storageclass
+   # (la fase `cluster` crea Longhorn e lo rende StorageClass di default)
    # Aggiornare config.yaml con il nome corretto della storage class
    ```
 

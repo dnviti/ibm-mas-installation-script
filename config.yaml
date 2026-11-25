@@ -73,7 +73,9 @@ applications:
 
 # File sensibili: percorsi relativi a files.secrets_dir (cartella esclusa da git)
 # Se esiste <secrets_dir>/config.local.yaml, i suoi valori sovrascrivono quelli di
-# questo file: usarlo per dati personali o specifici dell'ambiente (es. uds.*)
+# questo file: usarlo per dati personali o specifici dell'ambiente (es. uds.*).
+# Attenzione: i valori vuoti ("") in config.local.yaml NON sovrascrivono i valori non vuoti di
+# questo file (il parser scarta le chiavi vuote): per "svuotare" un valore, svuotarlo qui
 files:
   secrets_dir: ".secrets"
   entitlement_key: "entitlement-key"
